@@ -131,6 +131,8 @@ Secret token: super-secret-token
 Events: Push events, Merge request events
 ```
 
+Рекомендуемая политика сейчас такая: push в рабочие ветки разрешён, а опасный код отклоняется на Merge Request. При `Merge request event` CodeGuardian получает diff, проверяет его статическими правилами и LLM, ставит failed commit status, пишет inline-комментарии в MR прямо у строк с уязвимостями и закрывает MR, если есть блокирующие HIGH/CRITICAL findings.
+
 ## Как пользоваться панелью
 
 **Дашборд** показывает реальные KPI: количество проверок, найденные уязвимости, критичные findings, заблокированные PR, график за 7 дней и последние проверки.
@@ -191,20 +193,41 @@ cursor.execute(query)
 
 CodeGuardian AI создаст finding `CWE-89`, предложит параметризованный запрос и пометит проверку как `blocked`, если включена блокировка CRITICAL/HIGH.
 
-## Локальный pre-push scanner
+## Локальный scanner и MR-блокировка
 
 ```bash
 python -m app.cli scan --staged
 ```
 
-Для Git hook добавьте в `.git/hooks/pre-push`:
+Команда выше подходит для ручной проверки и возвращает exit code `1` при блокирующей угрозе. Для обычной разработки pre-push hook ставится в warn-only режиме, чтобы можно было пушить в свои ветки:
 
 ```bash
-#!/usr/bin/env bash
-python -m app.cli scan --staged
+python scripts/install_pre_push_hook.py --repo C:\path\to\your\repo
 ```
 
-При блокирующей угрозе команда завершится с exit code `1`.
+Если нужен старый режим с локальным отклонением push, установите hook так:
+
+```bash
+python scripts/install_pre_push_hook.py --repo C:\path\to\your\repo --block-push
+```
+
+Для блокировки именно merge включите в GitLab webhook событие **Merge request events**. По умолчанию `.env.example` уже содержит:
+
+```env
+SECURITY_BLOCK_MERGE_REQUESTS=true
+SECURITY_BLOCK_CLOSE_MR=true
+SECURITY_BLOCK_INLINE_COMMENTS=true
+SECURITY_BLOCK_PUSHES=false
+SECURITY_BLOCK_PRE_RECEIVE=false
+```
+
+Чтобы GitLab сам не давал слить непроверенный MR, включите merge checks и защиту `main`:
+
+```bash
+python scripts/configure_gitlab_merge_policy.py --project-id 2 --branch main
+```
+
+Скрипт включает `Pipelines must succeed`, `All discussions must be resolved`, запрещает merge при skipped pipeline и защищает `main` от прямого push. Project ID берите в GitLab: **Settings → General → Project ID** или из блока **Project information**.
 
 ## REST API
 
@@ -259,7 +282,7 @@ docker compose up -d --build
 
 ## Ограничения MVP
 
-- Webhook обрабатывает push/MR после события. Для жёсткой pre-receive блокировки нужен GitLab server hook или обязательный status check.
+- Push в ветки по умолчанию не блокируется: CodeGuardian блокирует Merge Request, пишет inline-комментарии и закрывает MR. Для server-side push-block включите `SECURITY_BLOCK_PUSHES=true` и `CODEGUARDIAN_ENFORCE_PUSH=1`.
 - Время анализа отображается как `—`, пока не подключён отдельный трекинг длительности pipeline.
 - Scanner rule-based и рассчитан на демонстрационные security-паттерны.
 - SQLite подходит для MVP, для команды лучше PostgreSQL.

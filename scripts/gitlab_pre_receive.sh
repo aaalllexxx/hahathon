@@ -12,18 +12,21 @@
 #   CODEGUARDIAN_API_TOKEN - optional, equals GITLAB_WEBHOOK_SECRET when SECURITY_PRECHECK_PUBLIC=false
 #
 # Behaviour:
-#   - reads <old> <new> <ref> tuples from stdin
-#   - computes git diff for the pushed range
-#   - sends diff to /api/git/precheck (origin=pre-receive)
-#   - HTTP 422 (blocked) -> exit 1, push rejected by GitLab
-#   - network error -> exit 0 (fail-open, рассчитывайте на client + webhook)
-#   - изменить на fail-closed: установите CODEGUARDIAN_STRICT=1
+#   - by default branch pushes are allowed, because CodeGuardian blocks Merge Requests
+#   - set CODEGUARDIAN_ENFORCE_PUSH=1 to reject unsafe pushes at pre-receive
+#   - set CODEGUARDIAN_AUDIT_PUSH=1 to scan pushes but never reject them
 
 set -uo pipefail
 
 API="${CODEGUARDIAN_API:-}"
 TOKEN="${CODEGUARDIAN_API_TOKEN:-}"
 STRICT="${CODEGUARDIAN_STRICT:-0}"
+ENFORCE_PUSH="${CODEGUARDIAN_ENFORCE_PUSH:-0}"
+AUDIT_PUSH="${CODEGUARDIAN_AUDIT_PUSH:-0}"
+
+if [ "$ENFORCE_PUSH" != "1" ] && [ "$AUDIT_PUSH" != "1" ]; then
+  exit 0
+fi
 
 if [ -z "$API" ]; then
   echo "[CodeGuardian] CODEGUARDIAN_API не настроен, пропуск pre-receive." >&2
@@ -80,17 +83,23 @@ PY
 
   if [ "$HTTP_CODE" = "422" ]; then
     echo "" >&2
-    echo "✖ CodeGuardian AI rejected push to $REF" >&2
+    if [ "$ENFORCE_PUSH" = "1" ]; then
+      echo "✖ CodeGuardian AI rejected push to $REF" >&2
+    else
+      echo "⚠ CodeGuardian AI found issues in $REF, but branch pushes are allowed. Merge Request will be blocked." >&2
+    fi
     python3 -c "import json,sys;d=json.load(open('/tmp/cg_resp.json'));b=d.get('detail',d);print(b.get('block_message') or '');[print(f\"- [{f.get('severity')}] {f.get('cwe')} {f.get('title')} @ {f.get('file')}:{f.get('line')}\") for f in (b.get('findings') or [])]" >&2 || cat /tmp/cg_resp.json >&2
-    block_reason="blocked"
+    if [ "$ENFORCE_PUSH" = "1" ]; then
+      block_reason="blocked"
+    fi
   elif [ "$HTTP_CODE" = "000" ] || [ "$HTTP_CODE" = "" ]; then
     echo "[CodeGuardian] WARNING: API недоступен ($API)." >&2
-    if [ "$STRICT" = "1" ]; then
+    if [ "$STRICT" = "1" ] && [ "$ENFORCE_PUSH" = "1" ]; then
       block_reason="api-down"
     fi
   elif [ "$HTTP_CODE" != "200" ]; then
     echo "[CodeGuardian] WARNING: неожиданный код $HTTP_CODE от API." >&2
-    if [ "$STRICT" = "1" ]; then
+    if [ "$STRICT" = "1" ] && [ "$ENFORCE_PUSH" = "1" ]; then
       block_reason="api-error"
     fi
   fi

@@ -248,11 +248,12 @@ def scan_code_snippet(message: str) -> dict[str, Any]:
         "\n".join(f"+{line}" for line in code_lines[:80]),
     )
     result = scan_diff(diff, use_llm=True)
+    findings = sorted(result.findings, key=lambda finding: finding.cwe == "AI-REVIEW")
     return {
         "scanned": True,
         "status": result.status,
         "severity": result.severity,
-        "findings": [finding.to_dict() for finding in result.findings[:6]],
+        "findings": [finding.to_dict() for finding in findings[:6]],
     }
 
 

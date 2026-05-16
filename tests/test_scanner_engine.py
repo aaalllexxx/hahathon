@@ -1,4 +1,4 @@
-from app.scanner.engine import ScanFinding, scan_diff
+from app.scanner.engine import ScanFinding, _anchor_llm_findings, scan_diff
 from app.scanner.severity import build_summary, highest_severity, should_block
 
 
@@ -56,3 +56,58 @@ def test_severity_decision_logic_blocks_critical_and_high():
     assert highest_severity([finding.severity for finding in findings]) == "CRITICAL"
     assert build_summary(findings) == {"critical": 1, "high": 1, "medium": 0, "low": 0}
     assert should_block(findings, block_on_critical=True, block_on_high=True)
+
+
+def test_anchor_llm_cve_finding_to_dependency_line():
+    diff = """diff --git a/requirements.txt b/requirements.txt
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -0,0 +1,1 @@
++flask==0.12
+"""
+    finding = ScanFinding(
+        cwe="CVE",
+        title="CVE-2025-47278: flask fallback key",
+        severity="HIGH",
+        file="unknown",
+        line=1,
+        code="",
+        reason="Flask uses fallback key instead of current signing key",
+        fix="Update Flask",
+        fixed_example="flask>=3",
+    )
+
+    _anchor_llm_findings(diff, [finding])
+
+    assert finding.file == "requirements.txt"
+    assert finding.line == 1
+    assert finding.code == "flask==0.12"
+
+
+def test_anchor_llm_cve_finding_to_import_line():
+    diff = """diff --git a/test.py b/test.py
+--- a/test.py
++++ b/test.py
+@@ -0,0 +1,4 @@
++# safe_jwt_auth.py
++
++import jwt
++from flask import Flask, request, jsonify
+"""
+    finding = ScanFinding(
+        cwe="CVE",
+        title="CVE-2025-47278: flask fallback key",
+        severity="HIGH",
+        file="unknown",
+        line=1,
+        code="import jwt",
+        reason="Flask uses fallback key instead of current signing key",
+        fix="Update Flask",
+        fixed_example="flask>=3",
+    )
+
+    _anchor_llm_findings(diff, [finding])
+
+    assert finding.file == "test.py"
+    assert finding.line == 4
+    assert finding.code == "from flask import Flask, request, jsonify"

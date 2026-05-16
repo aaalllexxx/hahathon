@@ -1,12 +1,19 @@
 #!/usr/bin/env bash
 # CodeGuardian AI server-side pre-receive hook for GitLab.
-# Hardcoded defaults for docker-compose deployment.
+# Docker Compose default is MR-only enforcement: branch pushes are allowed.
+# Set CODEGUARDIAN_ENFORCE_PUSH=1 only if you really want server-side push blocking.
 
 set -uo pipefail
 
 API="${CODEGUARDIAN_API:-http://codeguardian:8000}"
 TOKEN="${CODEGUARDIAN_API_TOKEN:-super-secret-token}"
-STRICT="${CODEGUARDIAN_STRICT:-1}"
+STRICT="${CODEGUARDIAN_STRICT:-0}"
+ENFORCE_PUSH="${CODEGUARDIAN_ENFORCE_PUSH:-0}"
+AUDIT_PUSH="${CODEGUARDIAN_AUDIT_PUSH:-0}"
+
+if [ "$ENFORCE_PUSH" != "1" ] && [ "$AUDIT_PUSH" != "1" ]; then
+  exit 0
+fi
 
 ZERO="0000000000000000000000000000000000000000"
 
@@ -57,7 +64,11 @@ PY
 
   if [ "$HTTP_CODE" = "422" ]; then
     echo "" >&2
-    echo "✖ CodeGuardian AI rejected push to $REF" >&2
+    if [ "$ENFORCE_PUSH" = "1" ]; then
+      echo "✖ CodeGuardian AI rejected push to $REF" >&2
+    else
+      echo "⚠ CodeGuardian AI found issues in $REF, but branch pushes are allowed. Merge Request will be blocked." >&2
+    fi
     python3 -c "
 import json
 try:
@@ -68,15 +79,17 @@ try:
     print(f'- [{f.get(\"severity\")}] {f.get(\"cwe\")} {f.get(\"title\")} @ {f.get(\"file\")}:{f.get(\"line\")}')
 except: pass
 " >&2
-    block_reason="blocked"
+    if [ "$ENFORCE_PUSH" = "1" ]; then
+      block_reason="blocked"
+    fi
   elif [ "$HTTP_CODE" = "000" ] || [ "$HTTP_CODE" = "" ]; then
     echo "[CodeGuardian] WARNING: API unavailable ($API)." >&2
-    if [ "$STRICT" = "1" ]; then
+    if [ "$STRICT" = "1" ] && [ "$ENFORCE_PUSH" = "1" ]; then
       block_reason="api-down"
     fi
   elif [ "$HTTP_CODE" != "200" ]; then
     echo "[CodeGuardian] WARNING: unexpected HTTP $HTTP_CODE from API." >&2
-    if [ "$STRICT" = "1" ]; then
+    if [ "$STRICT" = "1" ] && [ "$ENFORCE_PUSH" = "1" ]; then
       block_reason="api-error"
     fi
   fi

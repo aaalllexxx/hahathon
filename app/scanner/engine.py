@@ -3,9 +3,10 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 import json
 from pathlib import PurePosixPath
+import re
 
 from app.config import settings
-from app.scanner.cve_checker import cve_findings_from_diff
+from app.scanner.cve_checker import cve_findings_from_diff, parse_dependencies_from_diff
 from app.scanner.diff_parser import parse_unified_diff
 from app.scanner.rules import RuleMatch, detect_findings
 from app.scanner.severity import build_summary, highest_severity, should_block
@@ -142,6 +143,157 @@ def _llm_finding_to_scan_finding(item: dict[str, object]) -> ScanFinding | None:
     )
 
 
+def _needs_diff_anchor(finding: ScanFinding) -> bool:
+    return finding.file in {"", "unknown", "diff"} or not finding.line
+
+
+ANCHOR_STOPWORDS = {
+    "cve",
+    "cwe",
+    "high",
+    "medium",
+    "critical",
+    "warning",
+    "uses",
+    "instead",
+    "current",
+    "signing",
+    "found",
+    "detected",
+    "vulnerability",
+    "vulnerable",
+    "dependency",
+    "security",
+    "review",
+}
+
+
+def _anchor_tokens(finding: ScanFinding) -> set[str]:
+    haystack = " ".join(
+        [
+            finding.title,
+            finding.reason,
+            finding.fix,
+            finding.fixed_example,
+            finding.code,
+        ]
+    ).lower()
+    tokens: set[str] = set()
+    for raw_token in re.findall(r"[a-zа-я0-9_.:-]{3,}", haystack, flags=re.IGNORECASE):
+        for token in re.split(r"[_.:-]+", raw_token):
+            token = token.strip().lower()
+            if len(token) >= 4 and token not in ANCHOR_STOPWORDS and not token.isdigit():
+                tokens.add(token)
+    return tokens
+
+
+def _package_hints(finding: ScanFinding) -> list[str]:
+    haystack = " ".join([finding.title, finding.reason, finding.fix, finding.fixed_example]).lower()
+    hints: list[str] = []
+    patterns = [
+        r"cve-\d{4}-\d+:\s*([@a-z0-9_.-]+)",
+        r"vulnerable dependency:\s*([@a-z0-9_.-]+)",
+        r"(?:package|library|библиотека|пакет)\s+([@a-z0-9_.-]+)",
+    ]
+    for pattern in patterns:
+        for match in re.finditer(pattern, haystack, flags=re.IGNORECASE):
+            name = match.group(1).strip(" .,:;()[]{}").lower()
+            if len(name) >= 3 and name not in ANCHOR_STOPWORDS and name not in hints:
+                hints.append(name)
+    return hints
+
+
+def _matches_python_import(content_lower: str, package_name: str) -> bool:
+    module = package_name.replace("-", "_").split(".")[0]
+    return (
+        content_lower == f"import {module}"
+        or content_lower.startswith(f"import {module} ")
+        or content_lower.startswith(f"import {module}.")
+        or content_lower.startswith(f"from {module} import")
+        or content_lower.startswith(f"from {module}.")
+    )
+
+
+def _anchor_to_package_import(diff_files: list, finding: ScanFinding, package_name: str) -> bool:
+    for diff_file in diff_files:
+        for line in diff_file.additions:
+            content = line.content.strip()
+            if _matches_python_import(content.lower(), package_name):
+                finding.file = diff_file.path
+                finding.line = line.number
+                finding.code = content
+                return True
+    return False
+
+
+def _anchor_llm_findings(diff_text: str, llm_findings: list[ScanFinding]) -> None:
+    dependencies = parse_dependencies_from_diff(diff_text)
+    diff_files = parse_unified_diff(diff_text)
+
+    for finding in llm_findings:
+        if not _needs_diff_anchor(finding) or finding.cwe == "AI-REVIEW":
+            continue
+
+        haystack = " ".join(
+            [
+                finding.title,
+                finding.reason,
+                finding.fix,
+                finding.fixed_example,
+                finding.code,
+            ]
+        ).lower()
+        tokens = _anchor_tokens(finding)
+        package_hints = _package_hints(finding)
+
+        for dep in dependencies:
+            dep_name = dep.name.lower()
+            if dep_name in haystack or dep_name in package_hints:
+                finding.file = dep.file
+                finding.line = dep.line
+                finding.code = dep.raw.strip()
+                if "dependency" not in finding.reason.lower() and "зависим" not in finding.reason.lower():
+                    finding.reason = f"{finding.reason} Найдено в зависимости {dep.name}=={dep.version}."
+                break
+
+        if not _needs_diff_anchor(finding):
+            continue
+
+        for package_name in package_hints:
+            if _anchor_to_package_import(diff_files, finding, package_name):
+                break
+
+        if not _needs_diff_anchor(finding):
+            continue
+
+        code_hint = finding.code.strip().lower()
+        import_name = ""
+        if code_hint.startswith("import "):
+            import_name = code_hint.removeprefix("import ").split()[0].split(".")[0]
+        elif code_hint.startswith("from "):
+            import_name = code_hint.removeprefix("from ").split()[0].split(".")[0]
+
+        for diff_file in diff_files:
+            for line in diff_file.additions:
+                content = line.content.strip()
+                content_lower = content.lower()
+                if import_name and (
+                    content_lower.startswith(f"import {import_name}")
+                    or content_lower.startswith(f"from {import_name}")
+                ):
+                    finding.file = diff_file.path
+                    finding.line = line.number
+                    finding.code = content
+                    break
+                if tokens and any(token in content_lower for token in tokens):
+                    finding.file = diff_file.path
+                    finding.line = line.number
+                    finding.code = content
+                    break
+            if not _needs_diff_anchor(finding):
+                break
+
+
 def _review_diff_with_llm(diff_text: str, findings: list[ScanFinding]) -> list[ScanFinding]:
     try:
         from app.llm.reviewer import review_diff
@@ -154,6 +306,7 @@ def _review_diff_with_llm(diff_text: str, findings: list[ScanFinding]) -> list[S
             for converted in [_llm_finding_to_scan_finding(item)]
             if converted is not None
         ]
+        _anchor_llm_findings(diff_text, llm_findings)
         for finding in findings:
             finding.llm_verdict = finding.llm_verdict or "REVIEWED"
         return llm_findings
@@ -251,16 +404,15 @@ def scan_diff(diff_text: str, *, use_llm: bool | None = None) -> ScanResult:
     if use_llm is None:
         use_llm = settings.SECURITY_USE_LLM
 
-    # Primary: LLM review (includes CVE detection via OSV API inside reviewer)
+    findings.extend(_scan_cve_patterns(limited_diff))
+    for diff_file in parse_unified_diff(limited_diff):
+        if _is_ignored_path(diff_file.path):
+            continue
+        findings.extend(ScanFinding.from_rule_match(match) for match in detect_findings(diff_file))
+
+    # LLM review is mandatory when enabled, but static rules always remain active.
     if use_llm:
-        findings.extend(_review_diff_with_llm(limited_diff, []))
-    else:
-        # Fallback to static rules only when LLM is explicitly disabled
-        findings.extend(_scan_cve_patterns(limited_diff))
-        for diff_file in parse_unified_diff(limited_diff):
-            if _is_ignored_path(diff_file.path):
-                continue
-            findings.extend(ScanFinding.from_rule_match(match) for match in detect_findings(diff_file))
+        findings.extend(_review_diff_with_llm(limited_diff, findings))
 
     if settings.CVE_ENABLE:
         try:
@@ -297,6 +449,7 @@ def scan_diff(diff_text: str, *, use_llm: bool | None = None) -> ScanResult:
                 )
             )
 
+    _anchor_llm_findings(limited_diff, findings)
     findings = _deduplicate(findings)
 
     summary = build_summary(findings)

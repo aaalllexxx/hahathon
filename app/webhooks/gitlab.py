@@ -13,7 +13,7 @@ from app.git.gitlab_client import GitLabAPIError, GitLabClient
 from app.models import AuditLog, BotMessage, Finding, Repository, SecurityCheck
 from app.scanner.annotations import annotate_vulnerable_line
 from app.scanner.diff_parser import parse_unified_diff
-from app.scanner.engine import scan_diff
+from app.scanner.engine import ScanResult, scan_diff
 from app.webhooks.enforcement import (
     build_block_message,
     enforce_commit_status,
@@ -22,16 +22,6 @@ from app.webhooks.enforcement import (
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
-
-
-def _inline_body_for_commit(finding) -> str:
-    return (
-        f"🚫 **CodeGuardian AI · {finding.severity}** — {finding.cwe}\n\n"
-        f"**{finding.title}**\n\n"
-        f"_Почему опасно:_ {finding.reason or '—'}\n\n"
-        f"_Как исправить:_ {finding.fix or '—'}\n\n"
-        + (f"```\n{(finding.fixed_example or '')[:1200]}\n```" if finding.fixed_example else "")
-    )
 
 
 def _branch_from_ref(ref: str | None) -> str | None:
@@ -74,6 +64,8 @@ def _extract_event(payload: dict[str, Any]) -> dict[str, Any]:
             "project_name": project_name,
             "url": url,
             "branch": attrs.get("source_branch"),
+            "target_branch": attrs.get("target_branch"),
+            "action": attrs.get("action"),
             "commit_sha": last_commit.get("id") or attrs.get("last_commit_id"),
             "pr_number": attrs.get("iid"),
             "author": f"@{author}" if author and not str(author).startswith("@") else author,
@@ -87,6 +79,8 @@ def _extract_event(payload: dict[str, Any]) -> dict[str, Any]:
         "project_name": project_name,
         "url": url,
         "branch": _branch_from_ref(payload.get("ref")),
+        "target_branch": None,
+        "action": None,
         "commit_sha": after,
         "pr_number": None,
         "author": f"@{author}" if author and not str(author).startswith("@") else author,
@@ -95,6 +89,17 @@ def _extract_event(payload: dict[str, Any]) -> dict[str, Any]:
 
 def _count_added_lines(diff_text: str) -> int:
     return sum(len(file.additions) for file in parse_unified_diff(diff_text))
+
+
+def _warning_result(scan_result: ScanResult) -> ScanResult:
+    if scan_result.status != "blocked":
+        return scan_result
+    return ScanResult(
+        status="warning" if scan_result.findings else "passed",
+        summary=scan_result.summary,
+        severity=scan_result.severity,
+        findings=scan_result.findings,
+    )
 
 
 def _save_check(
@@ -234,9 +239,16 @@ async def gitlab_webhook(
     payload = await request.json()
     event = _extract_event(payload)
     client = GitLabClient()
+    is_merge_request = event["kind"] == "merge_request" and event.get("pr_number")
+
+    if is_merge_request and event.get("action") in {"close", "merge"}:
+        return {
+            "status": "skipped",
+            "reason": f"Merge request action '{event.get('action')}' does not require security enforcement",
+        }
 
     try:
-        if event["kind"] == "merge_request" and event.get("pr_number"):
+        if is_merge_request:
             diff_text = client.get_merge_request_diff(event["project_id"], int(event["pr_number"]))
         else:
             diff_text = client.get_commit_diff(event["project_id"], event["commit_sha"])
@@ -254,7 +266,43 @@ async def gitlab_webhook(
         db.commit()
         raise HTTPException(status_code=502, detail="Could not fetch GitLab diff") from exc
 
-    scan_result = scan_diff(diff_text, use_llm=settings.SECURITY_USE_LLM)
+    scan_text = diff_text
+    scanned_snapshot = False
+    if is_merge_request and not parse_unified_diff(diff_text) and event.get("branch"):
+        try:
+            scan_text = client.get_branch_snapshot_diff(event["project_id"], str(event["branch"]))
+            scanned_snapshot = bool(scan_text.strip())
+            if scanned_snapshot:
+                db.add(
+                    AuditLog(
+                        level="WARNING",
+                        event="mr.diff.empty.snapshot_scan",
+                        actor=event.get("author"),
+                        source="GitLab Snapshot Scanner",
+                        message=(
+                            f"MR !{event.get('pr_number')} не содержит diff. "
+                            f"CodeGuardian просканировал snapshot ветки {event.get('branch')}."
+                        ),
+                    )
+                )
+        except GitLabAPIError as exc:
+            db.add(
+                AuditLog(
+                    level="ERROR",
+                    event="mr.snapshot_scan.failed",
+                    actor=event.get("author"),
+                    source="GitLab Snapshot Scanner",
+                    message=str(exc),
+                )
+            )
+
+    scan_result = scan_diff(scan_text, use_llm=settings.SECURITY_USE_LLM)
+    mr_blocked = bool(
+        is_merge_request
+        and scan_result.status == "blocked"
+        and settings.SECURITY_BLOCK_MERGE_REQUESTS
+    )
+    stored_result = scan_result if mr_blocked else _warning_result(scan_result)
 
     enforcement_actions: list[str] = []
     enforcement_failures: list[str] = []
@@ -272,7 +320,7 @@ async def gitlab_webhook(
         elif err:
             enforcement_failures.append(f"commit.status: {err}")
 
-    if scan_result.status == "blocked" and event["kind"] == "merge_request" and event.get("pr_number"):
+    if mr_blocked:
         outcome = enforce_merge_request_block(
             db,
             client=client,
@@ -280,72 +328,37 @@ async def gitlab_webhook(
             merge_request_iid=int(event["pr_number"]),
             scan_result=scan_result,
             author=event.get("author"),
+            diff_text=diff_text,
         )
         enforcement_actions.extend(outcome.actions)
         enforcement_failures.extend(outcome.failures)
         enforcement_label = "mr-webhook"
     elif scan_result.status == "blocked":
-        enforcement_label = "push-webhook"
-
-    # Add inline commit comments for ANY blocked event with a commit_sha
-    if scan_result.status == "blocked" and event.get("commit_sha"):
-        logger.info(
-            "Adding inline commit comments for %s findings on commit %s",
-            len(scan_result.findings), event["commit_sha"],
-        )
-        for finding in scan_result.findings[:10]:
-            if not finding.file or not finding.line:
-                logger.debug("Skipping finding without file/line: %s", finding.title)
-                continue
-            try:
-                client.add_commit_comment(
-                    event["project_id"],
-                    event["commit_sha"],
-                    _inline_body_for_commit(finding),
-                    file_path=finding.file,
-                    line=int(finding.line),
-                )
-                enforcement_actions.append(f"commit.comment:{finding.file}:{finding.line}")
-                logger.info("Commit comment added: %s:%s", finding.file, finding.line)
-            except Exception as exc:
-                logger.warning("Commit comment failed: %s:%s — %s", finding.file, finding.line, exc)
-                enforcement_failures.append(f"commit.comment:{finding.file}:{finding.line}: {exc}")
-                # Fallback: try without line (general commit note)
-                try:
-                    client.add_commit_comment(
-                        event["project_id"],
-                        event["commit_sha"],
-                        _inline_body_for_commit(finding),
-                    )
-                    enforcement_actions.append(f"commit.note:{finding.file}:{finding.line}")
-                except Exception:
-                    pass
+        enforcement_label = "push-audit"
 
     check = _save_check(
         db,
         event,
-        scan_result,
-        diff_text,
+        stored_result,
+        scan_text,
         origin="webhook",
-        enforcement=enforcement_label,
+        enforcement=enforcement_label or ("mr-snapshot-scan" if scanned_snapshot else None),
     )
 
     payload = {
         "check_id": check.id,
-        "status": scan_result.status,
+        "status": stored_result.status,
         "severity": scan_result.severity,
         "summary": scan_result.summary,
-        "blocked": scan_result.status == "blocked",
+        "blocked": mr_blocked,
         "enforcement": {
             "label": enforcement_label,
             "actions": enforcement_actions,
             "failures": enforcement_failures,
         },
+        "push_policy": "allowed" if not is_merge_request else "merge_request_enforced",
+        "scanned_snapshot": scanned_snapshot,
         "findings": [f.to_dict() if hasattr(f, "to_dict") else {} for f in scan_result.findings],
-        "block_message": build_block_message(scan_result) if scan_result.status == "blocked" else None,
+        "block_message": build_block_message(scan_result) if mr_blocked else None,
     }
-    if scan_result.status == "blocked":
-        # 422 заставляет GitLab/CI пометить webhook как failed и не пропускать MR/push
-        raise HTTPException(status_code=422, detail=payload)
     return payload
-

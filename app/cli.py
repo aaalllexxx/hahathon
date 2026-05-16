@@ -21,7 +21,7 @@ def _configure_console() -> None:
 
 def _print_verdict(result: object) -> None:
     if result.status == "blocked":
-        print("✖ PUSH BLOCKED — CRITICAL SECURITY ISSUE", file=sys.stderr)
+        print("✖ CodeGuardian AI: CRITICAL SECURITY ISSUE", file=sys.stderr)
     elif result.findings:
         print("! SECURITY WARNINGS FOUND", file=sys.stderr)
     else:
@@ -136,6 +136,7 @@ def main(argv: list[str] | None = None) -> int:
     scan_parser.add_argument("--origin", default=None, help="Origin label sent to API (pre-push, pre-receive, ci, manual)")
     scan_parser.add_argument("--repository", default=None, help="Repository name to send to API")
     scan_parser.add_argument("--branch", default=None, help="Branch name to send to API")
+    scan_parser.add_argument("--warn-only", action="store_true", help="Print findings but always exit 0. Useful for branch pushes.")
     args = parser.parse_args(argv)
 
     if args.command != "scan":
@@ -185,6 +186,9 @@ def main(argv: list[str] | None = None) -> int:
             status, body = _call_precheck_api(args.api, payload, token=args.api_token, timeout=args.api_timeout)
             _print_remote_verdict(body)
             blocked = body.get("blocked") or body.get("status") == "blocked" or status == 422
+            if args.warn_only and blocked:
+                print("⚠ CodeGuardian AI: push разрешён, блокировка будет применена на Merge Request.", file=sys.stderr)
+                return 0
             return 1 if blocked else 0
         except Exception as exc:
             if args.no_fallback:
@@ -194,6 +198,9 @@ def main(argv: list[str] | None = None) -> int:
 
     result = scan_diff(diff_text, use_llm=not args.no_llm)
     _print_verdict(result)
+    if args.warn_only and result.status == "blocked":
+        print("⚠ CodeGuardian AI: push разрешён, блокировка будет применена на Merge Request.", file=sys.stderr)
+        return 0
     return 1 if result.status == "blocked" else 0
 
 

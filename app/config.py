@@ -47,7 +47,9 @@ class Settings(BaseSettings):
     # Enforcement
     SECURITY_BLOCK_CLOSE_MR: bool = True
     SECURITY_BLOCK_INLINE_COMMENTS: bool = True
-    SECURITY_BLOCK_PRE_RECEIVE: bool = True
+    SECURITY_BLOCK_MERGE_REQUESTS: bool = True
+    SECURITY_BLOCK_PUSHES: bool = False
+    SECURITY_BLOCK_PRE_RECEIVE: bool = False
     SECURITY_PRECHECK_PUBLIC: bool = True
     CODEGUARDIAN_PUBLIC_URL: str = "http://localhost:8000"
 

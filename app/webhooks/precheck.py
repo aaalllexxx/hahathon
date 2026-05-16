@@ -11,7 +11,7 @@ from app.config import settings
 from app.database import get_db
 from app.models import AuditLog, BotMessage, Finding, Repository, SecurityCheck
 from app.scanner.diff_parser import parse_unified_diff
-from app.scanner.engine import scan_diff
+from app.scanner.engine import ScanResult, scan_diff
 from app.webhooks.enforcement import build_block_message
 
 logger = logging.getLogger(__name__)
@@ -20,6 +20,26 @@ router = APIRouter(prefix="/api/git", tags=["enforcement"])
 
 def _count_added_lines(diff_text: str) -> int:
     return sum(len(file.additions) for file in parse_unified_diff(diff_text))
+
+
+def _should_enforce_origin(origin: str) -> bool:
+    normalized = origin.lower().strip()
+    if normalized in {"ci", "merge-request", "merge_request", "mr", "mr-webhook"}:
+        return settings.SECURITY_BLOCK_MERGE_REQUESTS
+    if normalized in {"pre-push", "pre-receive", "push", "push-webhook"}:
+        return settings.SECURITY_BLOCK_PUSHES or settings.SECURITY_BLOCK_PRE_RECEIVE
+    return normalized not in {"manual", "push-audit"}
+
+
+def _effective_result(scan_result: ScanResult, *, enforce: bool) -> ScanResult:
+    if enforce or scan_result.status != "blocked":
+        return scan_result
+    return ScanResult(
+        status="warning" if scan_result.findings else "passed",
+        summary=scan_result.summary,
+        severity=scan_result.severity,
+        findings=scan_result.findings,
+    )
 
 
 def _persist_check(
@@ -143,12 +163,14 @@ def precheck(
     use_llm = bool(payload.get("use_llm", settings.SECURITY_USE_LLM))
 
     scan_result = scan_diff(diff_text, use_llm=use_llm)
-    enforcement_label = origin if scan_result.status == "blocked" else None
+    enforce = scan_result.status == "blocked" and _should_enforce_origin(origin)
+    effective_result = _effective_result(scan_result, enforce=enforce)
+    enforcement_label = origin if enforce else None
 
     check = _persist_check(
         db,
         diff_text=diff_text,
-        scan_result=scan_result,
+        scan_result=effective_result,
         origin=origin,
         repository_name=repository_name,
         branch=branch,
@@ -159,15 +181,16 @@ def precheck(
 
     body = {
         "check_id": check.id,
-        "status": scan_result.status,
+        "status": effective_result.status,
         "severity": scan_result.severity,
         "summary": scan_result.summary,
-        "blocked": scan_result.status == "blocked",
-        "block_message": build_block_message(scan_result) if scan_result.status == "blocked" else None,
+        "blocked": enforce,
+        "block_message": build_block_message(scan_result) if enforce else None,
         "enforcement": enforcement_label,
+        "push_policy": "allowed" if origin in {"pre-push", "pre-receive", "push", "push-webhook"} and not enforce else "enforced",
         "findings": [f.to_dict() for f in scan_result.findings],
     }
-    if scan_result.status == "blocked":
-        # 422 — стандартный код, который легко отличить в shell-скриптах от сетевых ошибок.
+    if enforce:
+        # 422 — стандартный код, который легко отличить в CI/shell-скриптах от сетевых ошибок.
         raise HTTPException(status_code=422, detail=body)
     return body

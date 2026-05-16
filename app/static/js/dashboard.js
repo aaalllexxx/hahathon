@@ -477,6 +477,9 @@ function renderPolicyCard() {
   const p = state.ui.policy;
   el.innerHTML = `<div style="padding:8px 0;font-size:12px;color:var(--muted)">
     <div style="margin-bottom:6px;font-weight:700;color:var(--text)"><i class="fa-solid fa-shield-halved"></i> Политика</div>
+    ${p.merge_request_blocking ? '<div class="policy-chip" style="margin:3px 0"><i class="fa-solid fa-code-pull-request"></i> Block Merge Request</div>' : ''}
+    ${p.webhook_inline_comments ? '<div class="policy-chip" style="margin:3px 0"><i class="fa-regular fa-comment-dots"></i> Inline comments</div>' : ''}
+    ${!p.pre_push_blocking ? '<div class="policy-chip" style="margin:3px 0;border-color:rgba(63,188,231,.34);color:#9bdfff;background:rgba(63,188,231,.12)"><i class="fa-solid fa-code-branch"></i> Push allowed</div>' : ''}
     ${p.block_on_critical ? '<div class="policy-chip" style="margin:3px 0"><i class="fa-solid fa-lock"></i> Block Critical</div>' : ''}
     ${p.block_on_high ? '<div class="policy-chip" style="margin:3px 0"><i class="fa-solid fa-lock"></i> Block High</div>' : ''}
     ${p.llm_required ? '<div class="policy-chip" style="margin:3px 0"><i class="fa-solid fa-brain"></i> LLM Required</div>' : ''}
@@ -935,4 +938,3 @@ document.addEventListener('DOMContentLoaded', () => {
     body.dataset.theme = body.dataset.theme === 'dark' ? 'light' : 'dark';
   });
 });
-

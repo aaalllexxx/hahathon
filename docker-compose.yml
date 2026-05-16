@@ -8,14 +8,16 @@ services:
     environment:
       CODEGUARDIAN_API: http://codeguardian:8000
       CODEGUARDIAN_API_TOKEN: ${GITLAB_WEBHOOK_SECRET:-super-secret-token}
-      CODEGUARDIAN_STRICT: "1"
+      CODEGUARDIAN_STRICT: "0"
+      CODEGUARDIAN_ENFORCE_PUSH: "0"
+      CODEGUARDIAN_AUDIT_PUSH: "0"
       GITLAB_OMNIBUS_CONFIG: |
         external_url '${GITLAB_EXTERNAL_URL:-http://localhost:8080}'
         nginx['listen_port'] = 80
         nginx['listen_https'] = false
         gitlab_rails['gitlab_shell_ssh_port'] = ${GITLAB_SSH_PORT:-2222}
         gitaly['configuration'] = { hooks: { custom_hooks_dir: '/opt/gitlab-custom-hooks/global' } }
-        gitaly['env'] = { 'CODEGUARDIAN_API' => 'http://codeguardian:8000', 'CODEGUARDIAN_API_TOKEN' => '${GITLAB_WEBHOOK_SECRET:-super-secret-token}', 'CODEGUARDIAN_STRICT' => '1' }
+        gitaly['env'] = { 'CODEGUARDIAN_API' => 'http://codeguardian:8000', 'CODEGUARDIAN_API_TOKEN' => '${GITLAB_WEBHOOK_SECRET:-super-secret-token}', 'CODEGUARDIAN_STRICT' => '0', 'CODEGUARDIAN_ENFORCE_PUSH' => '0', 'CODEGUARDIAN_AUDIT_PUSH' => '0' }
     ports:
       - "${GITLAB_WEB_PORT:-8080}:80"
       - "${GITLAB_SSH_PORT:-2222}:22"
@@ -36,7 +38,6 @@ services:
       GITLAB_INTERNAL_URL: http://gitlab
       CODEGUARDIAN_WEBHOOK_URL: http://codeguardian:8000/webhooks/gitlab
       DATABASE_URL: sqlite:////app/data/codeguardian.db
-      OPENAI_BASE_URL: https://api.claudehub.fun/v1
     ports:
       - "${APP_PORT:-8000}:8000"
     depends_on:

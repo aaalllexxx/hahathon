@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.git.gitlab_client import GitLabAPIError, GitLabClient
 from app.models import AuditLog
+from app.scanner.diff_parser import DiffFile, parse_unified_diff
 from app.scanner.engine import ScanFinding, ScanResult
 
 logger = logging.getLogger(__name__)
@@ -68,12 +69,52 @@ def _safe(callable_, *, on_error: list[str], label: str) -> bool:
 
 def _inline_body(finding: ScanFinding) -> str:
     return (
-        f"🚫 **CodeGuardian AI · {finding.severity}** — {finding.cwe}\n\n"
+        f"**CodeGuardian AI отметил проблемный фрагмент кода · {finding.severity}** — {finding.cwe}\n\n"
         f"**{finding.title}**\n\n"
-        f"_Почему опасно:_ {finding.reason or '—'}\n\n"
-        f"_Как исправить:_ {finding.fix or '—'}\n\n"
+        f"**Почему этот фрагмент некачественный или опасный:** {finding.reason or '—'}\n\n"
+        f"**Как исправить:** {finding.fix or '—'}\n\n"
         + (f"```\n{_truncate(finding.fixed_example, 1200)}\n```" if finding.fixed_example else "")
     )
+
+
+def _added_line_numbers(diff_file: DiffFile) -> set[int]:
+    return {line.number for line in diff_file.additions}
+
+
+def _line_window(diff_files: list[DiffFile], finding: ScanFinding) -> tuple[int, int]:
+    if not finding.file or not finding.line:
+        return int(finding.line or 1), int(finding.line or 1)
+
+    diff_file = next((item for item in diff_files if item.path == finding.file), None)
+    if diff_file is None:
+        return int(finding.line), int(finding.line)
+
+    added_numbers = _added_line_numbers(diff_file)
+    if finding.line not in added_numbers:
+        return int(finding.line), int(finding.line)
+
+    code_lines = [line for line in (finding.code or "").splitlines() if line.strip()]
+    desired_span = max(1, min(len(code_lines), 4))
+    start_line = int(finding.line)
+    end_line = start_line + desired_span - 1
+
+    scan_by_number = {line.number: line.content for line in diff_file.scan_lines}
+    while end_line + 1 in added_numbers and end_line - start_line < 2:
+        next_content = scan_by_number.get(end_line + 1, "")
+        if not next_content.strip():
+            break
+        end_line += 1
+
+    return start_line, max(start_line, end_line)
+
+
+def _can_comment_inline(diff_files: list[DiffFile], finding: ScanFinding) -> bool:
+    if not finding.file or not finding.line:
+        return False
+    diff_file = next((item for item in diff_files if item.path == finding.file), None)
+    if diff_file is None:
+        return False
+    return int(finding.line) in _added_line_numbers(diff_file)
 
 
 def enforce_merge_request_block(
@@ -84,6 +125,7 @@ def enforce_merge_request_block(
     merge_request_iid: int,
     scan_result: ScanResult,
     author: str | None,
+    diff_text: str | None = None,
 ) -> EnforcementOutcome:
     actions: list[str] = []
     failures: list[str] = []
@@ -107,25 +149,29 @@ def enforce_merge_request_block(
             failures.append(f"mr.diff_refs: {exc}")
             base_sha = start_sha = head_sha = None
 
+        diff_files = parse_unified_diff(diff_text or "")
         if base_sha and start_sha and head_sha:
             for finding in scan_result.findings[:5]:
-                if not finding.file or not finding.line:
+                if not _can_comment_inline(diff_files, finding):
                     continue
+                start_line, end_line = _line_window(diff_files, finding)
+                # GitLab CE reliably supports single-line diff discussions through the API.
+                # The UI still shows them as review comments in the Changes tab.
                 if _safe(
                     lambda f=finding: client.create_mr_inline_discussion(
                         project_id=project_id,
                         merge_request_iid=merge_request_iid,
                         body=_inline_body(f),
                         file_path=f.file,
-                        new_line=int(f.line),
+                        new_line=start_line,
                         base_sha=base_sha,
                         start_sha=start_sha,
                         head_sha=head_sha,
                     ),
                     on_error=failures,
-                    label=f"mr.inline:{finding.file}:{finding.line}",
+                    label=f"mr.inline:{finding.file}:{start_line}",
                 ):
-                    actions.append("mr.inline")
+                    actions.append(f"mr.inline:{finding.file}:{start_line}")
 
     if settings.SECURITY_BLOCK_CLOSE_MR:
         if _safe(
