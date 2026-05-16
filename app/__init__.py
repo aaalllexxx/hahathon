@@ -1,0 +1,2 @@
+"""CodeGuardian AI application package."""
+

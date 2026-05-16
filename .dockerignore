@@ -1,0 +1,10 @@
+.env
+codeguardian.db
+*.db
+__pycache__/
+.pytest_cache/
+.venv/
+venv/
+materilals/
+tests/
+.git/

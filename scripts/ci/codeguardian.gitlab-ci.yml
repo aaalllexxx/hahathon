@@ -1,0 +1,93 @@
+# CodeGuardian AI — переиспользуемый шаблон для GitLab CI.
+#
+# Подключение в .gitlab-ci.yml целевого проекта:
+#
+#   include:
+#     - project: 'security/codeguardian'
+#       file: '/scripts/ci/codeguardian.gitlab-ci.yml'
+#       ref: main
+#
+# Переменные проекта/группы:
+#   CODEGUARDIAN_API        - URL CodeGuardian (например, http://codeguardian:8000)
+#   CODEGUARDIAN_API_TOKEN  - опционально, если /api/git/precheck закрыт токеном
+#
+# Job падает (exit 1) при blocked, не давая мержить MR.
+
+.codeguardian-base:
+  image: python:3.11-slim
+  variables:
+    PIP_DISABLE_PIP_VERSION_CHECK: "1"
+    PIP_NO_CACHE_DIR: "1"
+  before_script:
+    - apt-get update -qq && apt-get install -y --no-install-recommends git curl >/dev/null
+    - git config --global --add safe.directory "$CI_PROJECT_DIR"
+
+codeguardian:scan:
+  extends: .codeguardian-base
+  stage: test
+  script:
+    - |
+      if [ -z "${CODEGUARDIAN_API:-}" ]; then
+        echo "CODEGUARDIAN_API не задан — CodeGuardian CI пропущен" >&2
+        exit 0
+      fi
+      if [ -n "${CI_MERGE_REQUEST_DIFF_BASE_SHA:-}" ]; then
+        BASE="$CI_MERGE_REQUEST_DIFF_BASE_SHA"
+      else
+        BASE="${CI_COMMIT_BEFORE_SHA:-}"
+      fi
+      HEAD="${CI_COMMIT_SHA:-HEAD}"
+      if [ -n "$BASE" ] && [ "$BASE" != "0000000000000000000000000000000000000000" ]; then
+        git fetch --depth=200 origin "$BASE" 2>/dev/null || true
+        git diff --unified=0 "$BASE..$HEAD" > /tmp/cg.diff
+      else
+        git show --unified=0 "$HEAD" > /tmp/cg.diff
+      fi
+      python - <<'PY'
+      import json, os, sys, urllib.request, urllib.error
+      diff = open("/tmp/cg.diff", encoding="utf-8", errors="replace").read()
+      if not diff.strip():
+          print("CodeGuardian AI: пустой diff — пропуск"); sys.exit(0)
+      payload = json.dumps({
+          "diff": diff,
+          "origin": "ci",
+          "repository": os.environ.get("CI_PROJECT_PATH"),
+          "branch": os.environ.get("CI_COMMIT_REF_NAME"),
+          "commit_sha": os.environ.get("CI_COMMIT_SHA"),
+          "author": os.environ.get("GITLAB_USER_LOGIN"),
+      }).encode("utf-8")
+      req = urllib.request.Request(
+          os.environ["CODEGUARDIAN_API"].rstrip("/") + "/api/git/precheck",
+          data=payload, method="POST",
+          headers={"Content-Type": "application/json"},
+      )
+      tok = os.environ.get("CODEGUARDIAN_API_TOKEN")
+      if tok:
+          req.add_header("X-CodeGuardian-Token", tok)
+      try:
+          with urllib.request.urlopen(req, timeout=60) as resp:
+              body = json.loads(resp.read().decode("utf-8") or "{}")
+              print("✓ CodeGuardian AI: passed", body.get("summary"))
+              sys.exit(0)
+      except urllib.error.HTTPError as exc:
+          raw = exc.read().decode("utf-8", errors="replace")
+          try:
+              body = json.loads(raw)
+              detail = body.get("detail", body) if isinstance(body, dict) else {}
+          except Exception:
+              detail = {"raw": raw}
+          if exc.code == 422:
+              print("✖ CodeGuardian AI заблокировал MR", file=sys.stderr)
+              print(detail.get("block_message") or "", file=sys.stderr)
+              for f in (detail.get("findings") or []):
+                  print(f"- [{f.get('severity')}] {f.get('cwe')} {f.get('title')} @ {f.get('file')}:{f.get('line')}", file=sys.stderr)
+              sys.exit(1)
+          print(f"CodeGuardian AI: API вернул {exc.code}: {raw[:500]}", file=sys.stderr)
+          sys.exit(1)
+      except Exception as exc:
+          print(f"CodeGuardian AI: ошибка сети: {exc}", file=sys.stderr)
+          sys.exit(1)
+      PY
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'

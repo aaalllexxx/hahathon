@@ -1,0 +1,51 @@
+services:
+  gitlab:
+    image: gitlab/gitlab-ce:16.11.4-ce.0
+    container_name: codeguardian-gitlab
+    restart: unless-stopped
+    hostname: gitlab
+    shm_size: "256m"
+    environment:
+      CODEGUARDIAN_API: http://codeguardian:8000
+      CODEGUARDIAN_API_TOKEN: ${GITLAB_WEBHOOK_SECRET:-super-secret-token}
+      CODEGUARDIAN_STRICT: "1"
+      GITLAB_OMNIBUS_CONFIG: |
+        external_url '${GITLAB_EXTERNAL_URL:-http://localhost:8080}'
+        nginx['listen_port'] = 80
+        nginx['listen_https'] = false
+        gitlab_rails['gitlab_shell_ssh_port'] = ${GITLAB_SSH_PORT:-2222}
+        gitaly['configuration'] = { hooks: { custom_hooks_dir: '/opt/gitlab-custom-hooks/global' } }
+        gitaly['env'] = { 'CODEGUARDIAN_API' => 'http://codeguardian:8000', 'CODEGUARDIAN_API_TOKEN' => '${GITLAB_WEBHOOK_SECRET:-super-secret-token}', 'CODEGUARDIAN_STRICT' => '1' }
+    ports:
+      - "${GITLAB_WEB_PORT:-8080}:80"
+      - "${GITLAB_SSH_PORT:-2222}:22"
+    volumes:
+      - gitlab_config:/etc/gitlab
+      - gitlab_logs:/var/log/gitlab
+      - gitlab_data:/var/opt/gitlab
+      - ./scripts/hooks:/opt/gitlab-custom-hooks/global/pre-receive.d
+
+  codeguardian:
+    build: .
+    container_name: codeguardian-ai
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      GITLAB_URL: http://gitlab
+      GITLAB_INTERNAL_URL: http://gitlab
+      CODEGUARDIAN_WEBHOOK_URL: http://codeguardian:8000/webhooks/gitlab
+      DATABASE_URL: sqlite:////app/data/codeguardian.db
+      OPENAI_BASE_URL: https://api.claudehub.fun/v1
+    ports:
+      - "${APP_PORT:-8000}:8000"
+    depends_on:
+      - gitlab
+    volumes:
+      - codeguardian_data:/app/data
+
+volumes:
+  gitlab_config:
+  gitlab_logs:
+  gitlab_data:
+  codeguardian_data:

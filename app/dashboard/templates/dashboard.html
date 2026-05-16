@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ title }}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
+  <link rel="stylesheet" href="/static/css/dashboard.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body data-theme="dark">
+  <div class="app-shell no-drawer" id="appShell">
+    <aside class="sidebar" id="sidebar">
+      <div class="brand" id="brand">
+        <div class="brand-mark"><i class="fa-solid fa-shield-halved"></i></div>
+        <span id="brandText">CodeGuardian <strong>AI</strong></span>
+      </div>
+      <nav class="nav-list" id="navList" aria-label="Основная навигация"></nav>
+      <div class="sidebar-bottom">
+        <div class="policy-summary" id="policySummary"></div>
+        <div class="assistant-card" data-open-ai-chat role="button" tabindex="0" id="assistantCard"></div>
+      </div>
+    </aside>
+
+    <div class="workspace">
+      <header class="topbar">
+        <div class="topbar-title">
+          <nav class="breadcrumbs" id="breadcrumbs" aria-label="breadcrumbs"></nav>
+          <h1 id="pageTitle">CodeGuardian AI</h1>
+        </div>
+        <div class="topbar-actions">
+          <button class="cmdk-trigger" id="cmdkTrigger" type="button" title="Поиск (Ctrl+K)">
+            <i class="fa-solid fa-magnifying-glass"></i>
+            <span id="cmdkLabel">Найти PR, репо, лог…</span>
+            <kbd>Ctrl K</kbd>
+          </button>
+          <div class="project-switcher" id="projectSwitcher"></div>
+          <div class="user-chip" id="userChip">
+            <div class="avatar" id="userAvatar"></div>
+          </div>
+        </div>
+      </header>
+
+      <div class="toast-stack" id="toastStack" aria-live="polite" style="position:fixed;top:18px;right:18px;z-index:100"></div>
+
+      <main class="content" id="viewsRoot"></main>
+    </div>
+
+    <aside class="detail-drawer" id="detailDrawer" hidden>
+      <div id="drawerContent"></div>
+    </aside>
+  </div>
+
+  <div class="modal" id="connectRepoModal" aria-hidden="true">
+    <form class="modal-card" id="connectRepoForm">
+      <div class="drawer-header">
+        <h2 id="connectRepoTitle">Подключить репозиторий</h2>
+        <button class="icon-button" type="button" data-close-modal><i class="fa-solid fa-xmark"></i></button>
+      </div>
+      <label>Название<input name="name" placeholder="group/project" required></label>
+      <label>URL<input name="url" placeholder="http://localhost:8080/root/project"></label>
+      <label>GitLab project id<input name="gitlab_project_id" type="number" min="1" placeholder="123"></label>
+      <button class="primary-button" type="submit"><i class="fa-solid fa-plus"></i><span data-i18n="connect_repository">Подключить</span></button>
+    </form>
+  </div>
+
+  <div class="cmdk-overlay" id="cmdkOverlay" hidden style="display:none">
+    <div class="cmdk-modal" role="dialog" aria-label="Command palette">
+      <label class="cmdk-search">
+        <i class="fa-solid fa-magnifying-glass"></i>
+        <input id="cmdkInput" placeholder="Поиск по PR, репозиториям, логам…" autocomplete="off">
+        <kbd>Esc</kbd>
+      </label>
+      <div class="cmdk-results" id="cmdkResults"></div>
+    </div>
+  </div>
+
+  <div class="modal" id="aiChatModal" aria-hidden="true">
+    <div class="modal-card ai-chat-card">
+      <div class="drawer-header">
+        <h2><i class="fa-solid fa-robot"></i> AI Ассистент</h2>
+        <button class="icon-button" type="button" data-close-modal><i class="fa-solid fa-xmark"></i></button>
+      </div>
+      <div class="ai-chat-messages" id="aiChatMessages"></div>
+      <form class="ai-chat-form" id="aiChatForm">
+        <input id="aiChatInput" placeholder="Спросите про уязвимости, CWE, политики…" autocomplete="off">
+        <button type="submit"><i class="fa-solid fa-paper-plane"></i></button>
+      </form>
+    </div>
+  </div>
+
+  <script src="/static/js/dashboard.js"></script>
+</body>
+</html>
